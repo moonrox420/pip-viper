@@ -160,15 +160,12 @@ class GitService:
         cwd: Path,
         check: bool = True,
     ) -> subprocess.CompletedProcess[str]:
-        """Execute a git command with timeout and safe string decoding."""
+        """Execute a git command with timeout and safe process security."""
         repo_dir = cwd if cwd.is_dir() else cwd.parent
-        return subprocess.run(
+        from .services.process_service import ProcessService
+        return ProcessService.get_instance().run_command(
             ["git", *args],
             cwd=str(repo_dir),
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
             timeout=self._timeout,
             check=check,
         )

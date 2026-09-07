@@ -320,14 +320,13 @@ class DependencyScanner:
         if clean_name in self._pypi_cache:
             return self._pypi_cache[clean_name]
 
-        # PRD O1 / O7: Check Offline Mode before attempting network
+        # PRD O1 / O7: Check Offline Mode before attempting network (Strictly fail-closed)
         try:
-            from .services.offline_service import OfflineService
-            if OfflineService.get_instance().is_offline():
-                _LOGGER.warning("check_pypi_update skipped for '%s': Offline Mode is active.", clean_name)
-                return None
-        except Exception:
-            pass
+            from .services.offline_service import assert_network_allowed
+            assert_network_allowed("Query PyPI package updates")
+        except Exception as exc:
+            _LOGGER.warning("check_pypi_update blocked for '%s': %s", clean_name, exc)
+            return None
 
         url = f"https://pypi.org/pypi/{clean_name}/json"
         try:

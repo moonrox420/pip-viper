@@ -16,7 +16,6 @@ import logging
 import os
 import re
 import shutil
-import subprocess
 import sys
 from pathlib import Path
 from typing import Any, Callable
@@ -53,7 +52,7 @@ from .code_tools import (
     UnusedCleanupResult,
 )
 from .editor import CodeEditor, EditorContainer, EditorTabs
-from .diff_viewer import DiffViewerDialog, DiffViewerWidget
+from .diff_viewer import DiffDialog, DiffViewerDialog, DiffViewerWidget
 from .vcs import GitDiffHunk, GitService
 from .panels import (
     AiPanel, CodeToolsPanel, DebugPanel, GitPanel, GitWidget, InternalsPanel, LintWidget, LogWidget,
@@ -102,16 +101,21 @@ from .styles import get_stylesheet
 from .widgets import DocumentOutlineWidget, FileExplorer, MemoryMeterWidget, OfflineModeBadge
 from .controllers import (
     AIController,
+    CodeToolsController,
     EditorController,
     EnvironmentController,
     LayoutController,
+    MenuController,
     PackageController,
     RunDebugController,
     StatusBarController,
+    TestingController,
+    extract_code_from_markdown,
 )
 from .services import (
     AIService,
     EnvironmentService,
+    LinterService,
     OfflineModeError,
     OfflineService,
     PackageService,
@@ -122,126 +126,8 @@ from .services import (
 
 _LOGGER: logging.Logger = logging.getLogger("src.app")
 
-# Bump this whenever a QSplitter's pane composition changes (widgets added,
-# removed, or reordered). _restore_layout_state() uses it to refuse to apply
-# saved pane sizes from an incompatible older layout shape.
+# Bump this whenever a QSplitter's pane composition changes
 _LAYOUT_SCHEMA_VERSION = 3
-
-_LINTER_OUTPUT_PATTERNS: dict[LintTool, re.Pattern[str]] = {
-    LintTool.FLAKE8: re.compile(
-        r"^(?P<file>[^:]+):(?P<line>\d+):(?P<col>\d+):\s*(?P<code>[A-Z]\d+)\s+(?P<msg>.+)$"
-    ),
-    LintTool.PYLINT: re.compile(
-        r"^(?P<file>[^:]+):(?P<line>\d+):(?P<col>\d+):\s*(?P<code>[CWEF]\d+):\s*(?P<msg>.+)$"
-    ),
-    LintTool.MYPY: re.compile(
-        r"^(?P<file>[^:]+):(?P<line>\d+):(?:(?P<col>\d+):)?\s*(?P<msg>.+)$"
-    ),
-}
-
-_LINTER_SEVERITY_MAPPERS: dict[LintTool, Callable[[str], LintSeverity]] = {
-    LintTool.FLAKE8: lambda code: LintSeverity.WARNING,
-    LintTool.PYLINT: lambda code: (
-        LintSeverity.ERROR if code.startswith("E") else LintSeverity.WARNING
-    ),
-    LintTool.MYPY: lambda _code: LintSeverity.ERROR,
-}
-
-
-def extract_code_from_markdown(text: str) -> str:
-    """Robustly extracts python source code from markdown backtick fences if present.
-
-    Prevents raw Markdown explanations from polluting refactored code blocks.
-    """
-    # Look for explicitly fenced python blocks: ```python <source> ```
-    pattern = r"```[ \t]*python\s*\n(.*?)\n\s*```"
-    match = re.search(pattern, text, re.DOTALL | re.IGNORECASE)
-    if match:
-        return match.group(1).strip()
-
-    # Fall back to general generic code blocks: ``` <source> ```
-    generic_pattern = r"```\s*\n(.*?)\n\s*```"
-    match = re.search(generic_pattern, text, re.DOTALL)
-    if match:
-        return match.group(1).strip()
-
-    # Fallback to stripping leading or trailing standalone fences
-    cleaned = text.strip()
-    if cleaned.startswith("```"):
-        cleaned = re.sub(r"^```[a-zA-Z]*\n?", "", cleaned)
-    if cleaned.endswith("```"):
-        cleaned = re.sub(r"\n?```$", "", cleaned)
-    return cleaned.strip()
-
-
-# -----------------------------------------------------------------------------
-# Side-by-Side Code Review Diff Layout Dialog
-# -----------------------------------------------------------------------------
-
-
-class DiffDialog(QDialog):
-    """An interactive window showing side-by-side original and AI-modified code."""
-
-    def __init__(
-        self,
-        original_code: str,
-        modified_code: str,
-        palette: ColorPalette,
-        parent: QWidget | None = None,
-    ) -> None:
-        super().__init__(parent)
-        self.setWindowTitle("Review AI Refactoring Diffs")
-        self.resize(1100, 750)
-
-        self.setStyleSheet(
-            f"QDialog {{ background-color: {palette.background}; color: {palette.text}; }}"
-            f"QLabel {{ font-weight: bold; color: {palette.text}; }}"
-            f"QPushButton {{ background-color: {palette.panel}; color: {palette.text}; border: 1px solid {palette.border}; border-radius: 3px; padding: 6px 12px; }}"
-            f"QPushButton:hover {{ background-color: {palette.selection}; }}"
-        )
-
-        label_left = QLabel("Current Source Code:")
-        label_right = QLabel("Refactored Code Adjustments:")
-
-        self.original_view = QPlainTextEdit(self)
-        self.original_view.setReadOnly(True)
-        self.original_view.setFont(QFont("Consolas", 10))
-        self.original_view.setPlainText(original_code)
-
-        self.modified_view = QPlainTextEdit(self)
-        self.modified_view.setFont(QFont("Consolas", 10))
-        self.modified_view.setPlainText(modified_code)
-
-        col_layout = QHBoxLayout()
-        left_box = QVBoxLayout()
-        left_box.addWidget(label_left)
-        left_box.addWidget(self.original_view)
-
-        right_box = QVBoxLayout()
-        right_box.addWidget(label_right)
-        right_box.addWidget(self.modified_view)
-
-        col_layout.addLayout(left_box, 1)
-        col_layout.addLayout(right_box, 1)
-
-        self.accept_button = QPushButton("Accept and Update Code", self)
-        self.accept_button.clicked.connect(self.accept)
-
-        self.reject_button = QPushButton("Discard Suggestion", self)
-        self.reject_button.clicked.connect(self.reject)
-
-        button_layout = QHBoxLayout()
-        button_layout.addStretch(1)
-        button_layout.addWidget(self.reject_button)
-        button_layout.addWidget(self.accept_button)
-
-        layout = QVBoxLayout(self)
-        layout.addLayout(col_layout)
-        layout.addLayout(button_layout)
-
-    def get_modified_code(self) -> str:
-        """Return the user-reviewed code block."""
-        return self.modified_view.toPlainText()
 
 
 # -----------------------------------------------------------------------------
@@ -275,12 +161,12 @@ class MainWindow(QMainWindow):
         self._init_timers()
         self._init_panels()
         self._init_layout()
+        self._build_status_bar()
         self._init_controllers()
-        self._wire_signals()
-
         self._build_menu()
         self._build_toolbar()
-        self._build_status_bar()
+        self._wire_signals()
+
         self._apply_theme()
         self._open_welcome_buffer()
         self._restore_layout_state()
@@ -433,9 +319,30 @@ class MainWindow(QMainWindow):
         )
         self._ai_controller = AIController(self._ai_service, self)
         self._env_controller = EnvironmentController(self._env_service, self)
+        self._code_tools_controller = CodeToolsController(
+            editor_tabs=self._editor_tabs,
+            panel=self._code_tools_panel,
+            service=getattr(self._container, "code_tools_service", None),
+            palette=self._palette,
+            on_applied_callback=self._scan_dependencies,
+            parent=self,
+        )
+        self._testing_controller = TestingController(
+            test_panel=self._test_panel,
+            pytest_engine=self._pytest_engine,
+            editor_tabs=self._editor_tabs,
+            runtime_python_provider=self.get_runtime_python,
+            project_root_provider=lambda: self._project_root or Path.cwd(),
+            open_file_callback=self._open_file,
+            parent=self,
+        )
+        self._menu_controller = MenuController(self, self._get_action_handlers())
 
     def _wire_signals(self) -> None:
         """Route and connect signals between components and controllers."""
+        self._testing_controller.status_message.connect(self._status_label.setText)
+        self._package_controller.packages_updated.connect(self._pkg_widget.populate)
+        self._package_controller.status_message.connect(self._status_label.setText)
         self._jedi.results.connect(self._on_jedi_result)
         self._file_explorer.file_activated.connect(self._open_file)
         self._outline.item_selected.connect(self._jump_in_current_editor)
@@ -761,258 +668,64 @@ class MainWindow(QMainWindow):
             sizes[2] = 0
         self._content_splitter.setSizes(sizes)
 
+    def _get_action_handlers(self) -> dict[str, Callable[..., Any]]:
+        return {
+            "new_file": self._new_file,
+            "open_file": self._open_file_dialog,
+            "open_folder": self._open_folder_dialog,
+            "quick_open": self._open_quick_open,
+            "save": self._save_current,
+            "save_as": self._save_current_as,
+            "exit": self.close,
+            "command_palette": self._open_command_palette,
+            "find": self._find,
+            "find_in_files": self._focus_search_in_files,
+            "goto_line": self._goto_line,
+            "goto_definition": self._on_definition_requested,
+            "select_next": self._on_select_next_occurrence,
+            "fold_block": self._on_fold_block,
+            "unfold_block": self._on_unfold_block,
+            "fold_all": self._on_fold_all,
+            "unfold_all": self._on_unfold_all,
+            "set_theme": self.set_theme,
+            "toggle_ai_panel": self._toggle_ai_panel,
+            "split_right": self._on_split_right,
+            "split_down": self._on_split_down,
+            "close_split": self._on_close_split,
+            "git_panel": self._show_git_panel,
+            "debug_start": self._start_visual_debugging,
+            "debug_f5": self._on_debug_key_f5,
+            "run_current": self._run_current,
+            "debug_step_over": self._on_debug_step_over,
+            "debug_step_into": self._on_debug_step_into,
+            "debug_step_out": self._on_debug_step_out,
+            "toggle_breakpoint": self._toggle_current_line_breakpoint,
+            "debug_stop": self._stop_debugger,
+            "inspect_internals": self._show_internals_panel,
+            "send_to_repl": self._on_send_selection_menu,
+            "open_repl": self._show_repl_panel,
+            "open_terminal": self._show_terminal_panel,
+            "run_all_tests": self._run_all_tests,
+            "run_file_tests": self._run_current_file_tests,
+            "run_mypy": self._run_mypy_check,
+            "select_interpreter": self._show_environment_picker,
+            "dependencies_panel": self._show_dependencies_panel,
+            "sync_requirements": self._show_requirements_sync_dialog,
+            "about": self._show_about,
+            "shortcuts": self._show_shortcuts,
+            "stop_run": self._stop_run,
+            "tests_panel": self._show_tests_panel,
+            "run_linters": self._run_linters,
+            "code_tools_panel": self._show_code_tools_panel,
+            "refresh_packages": self._refresh_packages,
+        }
+
     def _build_menu(self) -> None:
-        menu_bar = self.menuBar()
-        file_menu = menu_bar.addMenu("&File")
-        self._add_action(
-            file_menu, "&New File", QKeySequence.StandardKey.New, self._new_file
-        )
-        self._add_action(
-            file_menu,
-            "&Open File...",
-            QKeySequence.StandardKey.Open,
-            self._open_file_dialog,
-        )
-        self._add_action(file_menu, "Open &Folder...", None, self._open_folder_dialog)
-        file_menu.addSeparator()
-        self._add_action(
-            file_menu, "&Quick Open...", QKeySequence("Ctrl+P"), self._open_quick_open
-        )
-        self._add_action(
-            file_menu, "&Save", QKeySequence.StandardKey.Save, self._save_current
-        )
-        self._add_action(
-            file_menu,
-            "Save &As...",
-            QKeySequence.StandardKey.SaveAs,
-            self._save_current_as,
-        )
-        file_menu.addSeparator()
-        file_menu.addAction("E&xit", self.close)
-
-        edit_menu = menu_bar.addMenu("&Edit")
-        self._add_action(
-            edit_menu,
-            "&Command Palette...",
-            QKeySequence("Ctrl+Shift+P"),
-            self._open_command_palette,
-        )
-        self._add_action(
-            edit_menu, "&Find...", QKeySequence.StandardKey.Find, self._find
-        )
-        self._add_action(
-            edit_menu,
-            "Find in &Files...",
-            QKeySequence("Ctrl+Shift+H"),
-            self._focus_search_in_files,
-        )
-        self._add_action(
-            edit_menu, "&Go to Line...", QKeySequence("Ctrl+G"), self._goto_line
-        )
-        self._add_action(
-            edit_menu, "&Go to Definition", QKeySequence("F12"), self._on_definition_requested
-        )
-        edit_menu.addSeparator()
-        self._add_action(
-            edit_menu,
-            "&Select Next Occurrence",
-            QKeySequence("Ctrl+D"),
-            self._on_select_next_occurrence,
-        )
-        self._add_action(
-            edit_menu,
-            "&Fold Block",
-            QKeySequence("Ctrl+Shift+["),
-            self._on_fold_block,
-        )
-        self._add_action(
-            edit_menu,
-            "&Unfold Block",
-            QKeySequence("Ctrl+Shift+]"),
-            self._on_unfold_block,
-        )
-        self._add_action(edit_menu, "Fold &All", None, self._on_fold_all)
-        self._add_action(edit_menu, "Unfold All", None, self._on_unfold_all)
-
-        view_menu = menu_bar.addMenu("&View")
-        theme_menu = view_menu.addMenu("&Theme")
-        for theme in EditorTheme:
-            action = QAction(theme.value.capitalize(), self)
-            action.triggered.connect(
-                lambda _checked_state=False, t=theme: self.set_theme(t)
-            )
-            theme_menu.addAction(action)
-        view_menu.addSeparator()
-        self._toggle_ai_action = QAction("Show AI &Assistant Column", self)
-        self._toggle_ai_action.setCheckable(True)
-        self._toggle_ai_action.setChecked(True)
-        self._toggle_ai_action.setShortcut(QKeySequence("Ctrl+Shift+A"))
-        self._toggle_ai_action.triggered.connect(self._toggle_ai_panel)
-        view_menu.addAction(self._toggle_ai_action)
-        view_menu.addSeparator()
-        self._add_action(
-            view_menu,
-            "Split Editor &Right",
-            QKeySequence("Ctrl+\\"),
-            self._on_split_right,
-        )
-        self._add_action(
-            view_menu,
-            "Split Editor &Down",
-            QKeySequence("Ctrl+Alt+\\"),
-            self._on_split_down,
-        )
-        self._add_action(
-            view_menu,
-            "&Close Split Pane",
-            None,
-            self._on_close_split,
-        )
-        self._add_action(
-            view_menu,
-            "Open &Git Source Control",
-            QKeySequence("Ctrl+Shift+G"),
-            self._show_git_panel,
-        )
-
-        run_menu = menu_bar.addMenu("&Run")
-
-        self._add_action(
-            run_menu,
-            "&Start / Continue Debugging",
-            QKeySequence("F5"),
-            self._on_debug_key_f5,
-        )
-        self._add_action(
-            run_menu,
-            "&Run (Without Debugging)",
-            QKeySequence("Ctrl+F5"),
-            self._run_current,
-        )
-        self._add_action(
-            run_menu,
-            "Step &Over",
-            QKeySequence("F10"),
-            self._on_debug_step_over,
-        )
-        self._add_action(
-            run_menu,
-            "Step &Into",
-            QKeySequence("F11"),
-            self._on_debug_step_into,
-        )
-        self._add_action(
-            run_menu,
-            "Step O&ut",
-            QKeySequence("Shift+F11"),
-            self._on_debug_step_out,
-        )
-        self._add_action(
-            run_menu,
-            "Toggle &Breakpoint",
-            QKeySequence("F9"),
-            self._toggle_current_line_breakpoint,
-        )
-        self._add_action(
-            run_menu,
-            "&Stop Debugging",
-            QKeySequence("Shift+F5"),
-            self._stop_debugger,
-        )
-        run_menu.addSeparator()
-        self._add_action(
-            run_menu,
-            "Inspect &Internals (Bytecode, AST)",
-            QKeySequence("F8"),
-            self._show_internals_panel,
-        )
-        run_menu.addSeparator()
-        self._add_action(
-            run_menu,
-            "Send Selection to REPL",
-            QKeySequence("Ctrl+Return"),
-            self._on_send_selection_menu,
-        )
-        self._add_action(
-            run_menu,
-            "Open &REPL",
-            QKeySequence("Ctrl+Shift+R"),
-            self._show_repl_panel,
-        )
-        self._add_action(
-            run_menu,
-            "Open &Terminal",
-            QKeySequence("Ctrl+Shift+T"),
-            self._show_terminal_panel,
-        )
-        run_menu.addSeparator()
-        self._add_action(
-            run_menu,
-            "Run &All Tests",
-            QKeySequence("Ctrl+Shift+U"),
-            self._run_all_tests,
-        )
-        self._add_action(
-            run_menu,
-            "Run &Active File Tests",
-            QKeySequence("Ctrl+Shift+F"),
-            self._run_current_file_tests,
-        )
-        self._add_action(
-            run_menu,
-            "Run &Mypy Type Check",
-            QKeySequence("F7"),
-            self._run_mypy_check,
-        )
-        run_menu.addSeparator()
-        self._add_action(
-            run_menu,
-            "Select &Python Interpreter...",
-            QKeySequence("Ctrl+Shift+I"),
-            self._show_environment_picker,
-        )
-        self._add_action(
-            run_menu,
-            "Open &Dependency Studio",
-            None,
-            self._show_dependencies_panel,
-        )
-        self._add_action(
-            run_menu,
-            "&Sync Requirements...",
-            None,
-            self._show_requirements_sync_dialog,
-        )
-
-        help_menu = menu_bar.addMenu("&Help")
-        help_menu.addAction("&About", self._show_about)
-        help_menu.addAction("&Keyboard Shortcuts", self._show_shortcuts)
-
-        # Index all menus into Universal Command Palette
-        for menu in [file_menu, edit_menu, view_menu, run_menu, help_menu]:
-            self._command_palette.register_qactions_from_menu(menu.title(), menu.actions())
+        self._menu_controller.build_menus(self.menuBar(), self._command_palette)
+        self._toggle_ai_action = self._menu_controller.toggle_ai_action
 
     def _build_toolbar(self) -> None:
-        toolbar = QToolBar("Main", self)
-        toolbar.setMovable(False)
-        for label_text, slot in [
-            ("📄 New", self._new_file),
-            ("📂 Open", self._open_file_dialog),
-            ("💾 Save", self._save_current),
-            ("▶ Run", self._run_current),
-            ("🧪 Tests", self._show_tests_panel),
-            ("🐞 Debug", self._start_visual_debugging),
-            ("■ Stop", self._stop_run),
-            ("🔬 Internals", self._show_internals_panel),
-            ("🔍 Lint", self._run_linters),
-            ("🛠 Code Tools", self._show_code_tools_panel),
-            ("📦 Packages", self._refresh_packages),
-            ("🕸 Dependencies", self._show_dependencies_panel),
-            ("🌿 Git", self._show_git_panel),
-        ]:
-            action = QAction(label_text, self)
-            action.triggered.connect(slot)
-            toolbar.addAction(action)
+        toolbar = self._menu_controller.build_toolbar()
         self.addToolBar(toolbar)
 
     def _build_status_bar(self) -> None:
@@ -1044,36 +757,15 @@ class MainWindow(QMainWindow):
         self.setStatusBar(bar)
 
 
-    def _add_action(
-        self,
-        menu: QMenu,
-        text: str,
-        shortcut: QKeySequence | QKeySequence.StandardKey | str | None,
-        slot: Callable[[], None],
-    ) -> None:
-        action = QAction(text, self)
-        if shortcut is not None:
-            action.setShortcut(shortcut)
-        action.triggered.connect(slot)
-        menu.addAction(action)
-
     def _new_file(self) -> None:
-        path = Path(f"untitled_{self._editor_tabs.editor_count() + 1}.py")
-        self._editor_tabs.add_editor(path, "")
+        self._editor_controller.new_file()
 
     def _open_file_dialog(self) -> None:
-        start = str(self._project_root) if self._project_root else str(Path.home())
-        file_path_str, _ = QFileDialog.getOpenFileName(
-            self, "Open File", start, "Python Files (*.py);;All Files (*)"
-        )
-        if file_path_str:
-            self._open_file(Path(file_path_str))
+        self._editor_controller.open_file_dialog(self)
 
     def _open_folder_dialog(self) -> None:
-        start = str(self._project_root) if self._project_root else str(Path.home())
-        folder_str = QFileDialog.getExistingDirectory(self, "Open Folder", start)
-        if folder_str:
-            folder = Path(folder_str)
+        folder = self._editor_controller.open_folder_dialog(self)
+        if folder:
             self._project_root = folder
             self._file_explorer.set_root(folder)
             self._git_widget.set_project_root(folder)
@@ -1088,30 +780,18 @@ class MainWindow(QMainWindow):
             self._search_panel.set_workspace_root(folder)
             
             self._status_label.setText(f"Opened project: {folder}")
+            self._trigger_diff_refresh()
+            self._refresh_test_discovery()
+            self._refresh_dependencies()
 
     def _open_file(self, path: Path) -> None:
-        try:
-            content = path.read_text(encoding="utf-8")
-        except OSError as exception:
-            _LOGGER.exception("Failed to read %s", path)
-            QMessageBox.warning(
-                self, "Open File", f"Could not read {path}:\n{exception}"
-            )
-            return
-        editor = self._editor_tabs.add_editor(path, content)
-        editor.set_file_path(path)
-        self._status_label.setText(f"Opened {path.name}")
-        self._scan_dependencies(editor)
+        editor = self._editor_controller.open_file(path)
+        if editor:
+            self._scan_dependencies(editor)
 
     def _open_file_at(self, file_path: str | Path, line: int = 1, col: int = 0) -> None:
         """Open a file at a specific line and column coordinate, centering the cursor."""
-        path = Path(file_path).resolve()
-        if not path.exists():
-            return
-        self._open_file(path)
-        editor = self._editor_tabs.current_editor()
-        if editor is not None:
-            editor.jump_to_line(line, col)
+        self._editor_controller.navigate_to_line(file_path, line, col)
 
     @Slot()
     def _open_quick_open(self) -> None:
@@ -1135,104 +815,28 @@ class MainWindow(QMainWindow):
         self._search_panel.focus_search()
 
     def _save_current(self) -> None:
-        editor = self._editor_tabs.current_editor()
-        if editor is None:
-            return
-        path = editor.file_path()
-        if path.name.startswith("untitled_") or not path.exists():
-            self._save_current_as()
-            return
-        if self._write_file(path, editor.toPlainText()):
-            self._editor_tabs.notify_saved(editor)
-            self._scan_dependencies(editor)
-            self._refresh_gutter_diffs(path)
+        if self._editor_controller.save_current_file(self):
+            editor = self._editor_tabs.current_editor()
+            if editor:
+                self._scan_dependencies(editor)
+                self._refresh_gutter_diffs(editor.file_path())
             self._git_widget.refresh_status()
 
     def _save_current_as(self) -> None:
-        editor = self._editor_tabs.current_editor()
-        if editor is None:
-            return
-        start = str(self._project_root) if self._project_root else str(Path.home())
-        path_str, _ = QFileDialog.getSaveFileName(
-            self, "Save File As", start, "Python Files (*.py)"
-        )
-        if not path_str:
-            return
-        path = Path(path_str)
-        if self._write_file(path, editor.toPlainText()):
-            editor.set_file_path(path)
-            self._editor_tabs.notify_saved(editor)
-            self._scan_dependencies(editor)
-            self._refresh_gutter_diffs(path)
+        if self._editor_controller.save_current_file_as(self):
+            editor = self._editor_tabs.current_editor()
+            if editor:
+                self._scan_dependencies(editor)
+                self._refresh_gutter_diffs(editor.file_path())
             self._git_widget.refresh_status()
-
-    def _write_file(self, path: Path, content: str) -> bool:
-
-        """Write ``content`` to ``path``, returning whether the write succeeded."""
-        try:
-            path.write_text(content, encoding="utf-8")
-        except OSError as exception:
-            _LOGGER.exception("Failed to save content write to %s", path)
-            QMessageBox.warning(
-                self, "Save File", f"Could not save workspace path:\n{exception}"
-            )
-            return False
-        self._status_label.setText(f"Saved file {path.name}")
-        return True
 
     def _on_unsaved_close_requested(self, tab_index: int) -> None:
         """Prompt to save/discard when a tab with unsaved changes is closed."""
-        container = self._editor_tabs.container_at(tab_index)
-        if container is None:
-            return
-        editor = container.editor
-        response = QMessageBox.question(
-            self,
-            "Unsaved Changes",
-            f"'{editor.file_path().name}' has unsaved changes.\n\nSave before closing?",
-            QMessageBox.StandardButton.Save
-            | QMessageBox.StandardButton.Discard
-            | QMessageBox.StandardButton.Cancel,
-            QMessageBox.StandardButton.Save,
-        )
-        if response == QMessageBox.StandardButton.Cancel:
-            return
-        if response == QMessageBox.StandardButton.Save:
-            path = editor.file_path()
-            if path.name.startswith("untitled_") or not path.exists():
-                # Route through the normal Save As flow so the user can
-                # choose a real path; if they cancel that dialog, the tab
-                # stays open with its unsaved changes rather than vanishing.
-                previous_current = self._editor_tabs.current_editor()
-                self._editor_tabs.set_current_editor(editor)
-                self._save_current_as()
-                if editor.is_modified():
-                    if previous_current is not None:
-                        self._editor_tabs.set_current_editor(previous_current)
-                    return
-            elif not self._write_file(path, editor.toPlainText()):
-                return
-            else:
-                self._editor_tabs.notify_saved(editor)
-        current_index = self._editor_tabs.tab_index_for(editor)
-        if current_index is not None:
-            self._editor_tabs.close_tab(current_index)
+        self._editor_controller.handle_unsaved_close(tab_index, self)
 
     def _on_autosave_timeout(self) -> None:
-        """Persist every open editor with unsaved changes to its existing path.
-
-        Buffers that have never been saved (``untitled_*.py`` or a path that
-        doesn't exist on disk yet) are skipped -- autosave should never pop
-        a "Save As" dialog in the background while the user is typing.
-        """
-        saved_count = 0
-        for editor in self._editor_tabs.modified_editors():
-            path = editor.file_path()
-            if path.name.startswith("untitled_") or not path.exists():
-                continue
-            if self._write_file(path, editor.toPlainText()):
-                self._editor_tabs.notify_saved(editor)
-                saved_count += 1
+        """Persist every open editor with unsaved changes to its existing path."""
+        saved_count = self._editor_controller.autosave()
         if saved_count:
             self._status_label.setText(f"Auto-saved {saved_count} file(s).")
 
@@ -1394,125 +998,60 @@ class MainWindow(QMainWindow):
         """Focus the visual test runner dock and discover tests if empty."""
         self._bottom_tabs.setCurrentWidget(self._test_panel)
         if not self._test_panel._all_items:
-            self._refresh_test_discovery()
+            self._testing_controller.refresh_test_discovery()
 
     def _refresh_test_discovery(self) -> None:
         """Asynchronously discover tests across the active project root."""
-        project_root = self._project_root or Path.cwd()
-        py_exe = self.get_runtime_python()
-        self._status_label.setText("Discovering tests...")
-
-        def do_discover() -> list[TestItem]:
-            return self._pytest_engine.discover_tests(project_root, py_exe)
-
-        def on_discover_done(items: list[TestItem]) -> None:
-            self._test_panel.set_tests(items)
-            self._status_label.setText(f"Discovered {len(items)} test(s).")
-
-        worker = run_in_thread(do_discover)
-        worker.signals.result.connect(on_discover_done)
+        self._testing_controller.refresh_test_discovery()
 
     def _run_all_tests(self) -> None:
         """Execute the entire test suite in the project workspace."""
         self._bottom_tabs.setCurrentWidget(self._test_panel)
-        self._test_panel.set_running(True)
-        project_root = self._project_root or Path.cwd()
-        py_exe = self.get_runtime_python()
-        self._status_label.setText("Running full test suite...")
-        self._pytest_engine.start_run(project_root, py_exe)
+        self._testing_controller.run_all_tests()
 
     def _run_failed_tests(self) -> None:
         """Re-run only previously failed tests."""
         self._bottom_tabs.setCurrentWidget(self._test_panel)
-        self._test_panel.set_running(True)
-        project_root = self._project_root or Path.cwd()
-        py_exe = self.get_runtime_python()
-        self._status_label.setText("Running failed tests (--lf)...")
-        self._pytest_engine.start_run(project_root, py_exe, failed_only=True)
+        self._testing_controller.run_failed_tests()
 
     def _run_file_tests(self, file_path: Path) -> None:
         """Run tests located inside a specific file."""
         self._bottom_tabs.setCurrentWidget(self._test_panel)
-        self._test_panel.set_running(True)
-        project_root = self._project_root or Path.cwd()
-        py_exe = self.get_runtime_python()
-        self._status_label.setText(f"Running tests in {file_path.name}...")
-        try:
-            rel_path = str(file_path.relative_to(project_root)).replace("\\", "/")
-        except ValueError:
-            rel_path = str(file_path).replace("\\", "/")
-        self._pytest_engine.start_run(project_root, py_exe, node_ids=[rel_path])
+        self._testing_controller.run_file_tests(file_path)
 
     def _run_current_file_tests(self) -> None:
         """Run tests in the currently open editor tab."""
-        editor = self._editor_tabs.current_editor()
-        if editor is not None:
-            self._run_file_tests(editor.file_path())
+        self._testing_controller.run_current_file_tests()
 
     def _run_single_test(self, node_id: str) -> None:
         """Execute a targeted test item by its Pytest node ID."""
         self._bottom_tabs.setCurrentWidget(self._test_panel)
-        self._test_panel.set_running(True)
-        project_root = self._project_root or Path.cwd()
-        py_exe = self.get_runtime_python()
-        self._status_label.setText(f"Running test: {node_id}...")
-        self._pytest_engine.start_run(project_root, py_exe, node_ids=[node_id])
+        self._testing_controller.run_single_test(node_id)
 
     def _on_gutter_test_run_requested(
         self, file_path: Path, test_name: str, _line: int
     ) -> None:
         """Handle user clicking a gutter play button in the code editor."""
-        project_root = self._project_root or Path.cwd()
-        try:
-            rel_path = str(file_path.relative_to(project_root)).replace("\\", "/")
-        except ValueError:
-            rel_path = str(file_path).replace("\\", "/")
-
-        target_node = None
-        for nid in self._test_panel._items_by_node_id:
-            if nid.startswith(rel_path) and test_name in nid:
-                target_node = nid
-                break
-
-        if target_node:
-            self._run_single_test(target_node)
-        else:
-            self._bottom_tabs.setCurrentWidget(self._test_panel)
-            self._test_panel.set_running(True)
-            self._pytest_engine.start_run(
-                project_root,
-                self.get_runtime_python(),
-                node_ids=[rel_path],
-                extra_args=["-k", test_name],
-            )
+        self._bottom_tabs.setCurrentWidget(self._test_panel)
+        self._testing_controller.on_gutter_test_run_requested(file_path, test_name, _line)
 
     @Slot(str)
     def _on_test_started(self, node_id: str) -> None:
-        self._test_panel.update_test_status(node_id, TestStatus.RUNNING)
+        self._testing_controller._on_test_started(node_id)
 
     @Slot(str, str, float, str)
     def _on_test_finished(
         self, node_id: str, status: str, duration_ms: float, traceback: str
     ) -> None:
-        self._test_panel.update_test_status(node_id, status, duration_ms, traceback)
+        self._testing_controller._on_test_finished(node_id, status, duration_ms, traceback)
 
     @Slot(object)
     def _on_test_run_finished(self, summary: TestSuiteSummary) -> None:
-        self._test_panel.set_running(False)
-        self._test_panel.set_summary(summary)
-        self._status_label.setText(
-            f"Test run completed: {summary.passed} passed, {summary.failed} failed ({summary.duration_sec}s)"
-        )
+        self._testing_controller._on_test_run_finished(summary)
 
     def _jump_to_source_location(self, file_path: Path, line: int) -> None:
         """Jump to the source file and line from a test item double-click."""
-        project_root = self._project_root or Path.cwd()
-        full_path = project_root / file_path if not file_path.is_absolute() else file_path
-        if full_path.is_file():
-            self._open_file(full_path)
-            editor = self._editor_tabs.current_editor()
-            if editor:
-                editor.jump_to_line(line, 0)
+        self._testing_controller.jump_to_source_location(file_path, line)
 
     def _run_mypy_check(self) -> None:
         """Run Mypy static type checking on the currently focused editor."""
@@ -1631,11 +1170,9 @@ class MainWindow(QMainWindow):
         self._status_label.setText(f"Installing missing packages: {packages_string}...")
 
         def run_install() -> None:
-            safe_env = self._process_service.build_safe_environment()
+            py_exe = self.get_runtime_python()
             for package in pypi_packages:
-                cmd = self.get_package_manager_cmd("install", package)
-                sanitized_cmd = self._process_service.sanitize_arguments(cmd)
-                subprocess.run(sanitized_cmd, env=safe_env, timeout=300, check=True)
+                self._package_service.install_package(py_exe, package)
 
         def on_install_finished() -> None:
             self._status_label.setText(f"Successfully installed: {packages_string}")
@@ -2249,10 +1786,12 @@ class MainWindow(QMainWindow):
 
         def execute_all_linters() -> list[LintIssue]:
             detected_issues: list[LintIssue] = []
+            linter_service = LinterService.get_instance()
+            py_bin = self.get_runtime_python()
             for linter_tool in LintTool:
                 try:
                     detected_issues.extend(
-                        self._run_single_linter(linter_tool, file_path, source_content)
+                        linter_service.run_linter(linter_tool, file_path, py_bin)
                     )
                 except Exception as exception:
                     _LOGGER.error(
@@ -2296,7 +1835,7 @@ class MainWindow(QMainWindow):
     # -------------------------------------------------------------------------
 
     def _show_code_tools_panel(self) -> None:
-        self._bottom_tabs.setCurrentWidget(self._code_tools_panel)
+        self._code_tools_controller.show_code_tools_panel()
 
     def _preview_and_apply(
         self,
@@ -2305,327 +1844,45 @@ class MainWindow(QMainWindow):
         new_source: str,
         operation_label: str,
     ) -> None:
-        """Show a diff review for a code-tools mutation and apply it if accepted.
-
-        No-ops (with a log line) if the operation produced no changes, so
-        accepting an empty diff can never happen.
-        """
-        if new_source == original_source:
-            self._code_tools_panel.log(f"{operation_label}: no changes needed.")
-            return
-        dialog = DiffDialog(original_source, new_source, self._palette, self)
-        dialog.setWindowTitle(f"Review: {operation_label}")
-        if dialog.exec() == QDialog.DialogCode.Accepted:
-            editor.replace_content(dialog.get_modified_code())
-            self._code_tools_panel.log(f"{operation_label}: changes applied.")
-            self._scan_dependencies(editor)
-        else:
-            self._code_tools_panel.log(f"{operation_label}: changes discarded.")
+        self._code_tools_controller.preview_and_apply(
+            editor, original_source, new_source, operation_label
+        )
 
     @Slot()
     def _on_check_syntax_requested(self) -> None:
-        editor = self._editor_tabs.current_editor()
-        if editor is None:
-            return
-        source = editor.toPlainText()
-        self._code_tools_panel.set_busy(True)
-        self._show_code_tools_panel()
-
-        def perform() -> SyntaxCheckResult:
-            return SyntaxAutoFixer.check(source)
-
-        def on_success(result: SyntaxCheckResult) -> None:
-            self._code_tools_panel.set_busy(False)
-            self._code_tools_panel.populate_issues(result.issues)
-            editor.set_syntax_issues(result.issues)
-            if result.is_valid:
-                self._code_tools_panel.log("✓ No syntax errors found.")
-            else:
-                self._code_tools_panel.log(
-                    f"✗ {len(result.issues)} syntax issue(s) found."
-                )
-
-        def on_error(message: str) -> None:
-            self._code_tools_panel.set_busy(False)
-            self._code_tools_panel.log(f"Syntax check failed: {message}")
-
-        worker = run_in_thread(perform)
-        worker.signals.result.connect(on_success)
-        worker.signals.error.connect(on_error)
+        self._code_tools_controller.check_syntax()
 
     @Slot()
     def _on_autofix_requested(self) -> None:
-        editor = self._editor_tabs.current_editor()
-        if editor is None:
-            return
-        source = editor.toPlainText()
-        self._code_tools_panel.set_busy(True)
-        self._show_code_tools_panel()
-
-        def perform() -> SyntaxFixResult:
-            return SyntaxAutoFixer.autofix(source)
-
-        def on_success(result: SyntaxFixResult) -> None:
-            self._code_tools_panel.set_busy(False)
-            if result.applied_fixes:
-                self._code_tools_panel.log(
-                    "Auto-fix applied: " + "; ".join(result.applied_fixes)
-                )
-            if result.remaining_issue is not None:
-                self._code_tools_panel.log(
-                    f"Auto-fix stopped at line {result.remaining_issue.line}: "
-                    f"{result.remaining_issue.message}"
-                )
-            editor.set_syntax_issues(
-                [result.remaining_issue] if result.remaining_issue else []
-            )
-            self._preview_and_apply(
-                editor, source, result.fixed_source, "Auto-Fix Syntax"
-            )
-
-        def on_error(message: str) -> None:
-            self._code_tools_panel.set_busy(False)
-            self._code_tools_panel.log(f"Auto-fix failed: {message}")
-
-        worker = run_in_thread(perform)
-        worker.signals.result.connect(on_success)
-        worker.signals.error.connect(on_error)
+        self._code_tools_controller.autofix()
 
     @Slot()
     def _on_format_requested(self) -> None:
-        editor = self._editor_tabs.current_editor()
-        if editor is None:
-            return
-        source = editor.toPlainText()
-        self._code_tools_panel.set_busy(True)
-        self._show_code_tools_panel()
-
-        def perform() -> FormatResult:
-            return CodeFormatter.format_source(source)
-
-        def on_success(result: FormatResult) -> None:
-            self._code_tools_panel.set_busy(False)
-            self._preview_and_apply(
-                editor, source, result.formatted_source, "Format (Black)"
-            )
-
-        def on_error(message: str) -> None:
-            self._code_tools_panel.set_busy(False)
-            self._code_tools_panel.log(f"Format failed: {message}")
-
-        worker = run_in_thread(perform)
-        worker.signals.result.connect(on_success)
-        worker.signals.error.connect(on_error)
+        self._code_tools_controller.format_source()
 
     @Slot()
     def _on_organize_imports_requested(self) -> None:
-        editor = self._editor_tabs.current_editor()
-        if editor is None:
-            return
-        source = editor.toPlainText()
-        self._code_tools_panel.set_busy(True)
-        self._show_code_tools_panel()
-
-        def perform() -> ImportOrganizeResult:
-            return CodeFormatter.organize_imports(source)
-
-        def on_success(result: ImportOrganizeResult) -> None:
-            self._code_tools_panel.set_busy(False)
-            self._preview_and_apply(
-                editor, source, result.organized_source, "Organize Imports"
-            )
-
-        def on_error(message: str) -> None:
-            self._code_tools_panel.set_busy(False)
-            self._code_tools_panel.log(f"Organize imports failed: {message}")
-
-        worker = run_in_thread(perform)
-        worker.signals.result.connect(on_success)
-        worker.signals.error.connect(on_error)
+        self._code_tools_controller.organize_imports()
 
     @Slot()
     def _on_remove_unused_requested(self) -> None:
-        editor = self._editor_tabs.current_editor()
-        if editor is None:
-            return
-        source = editor.toPlainText()
-        self._code_tools_panel.set_busy(True)
-        self._show_code_tools_panel()
-
-        def perform() -> UnusedCleanupResult:
-            return CodeFormatter.remove_unused(source)
-
-        def on_success(result: UnusedCleanupResult) -> None:
-            self._code_tools_panel.set_busy(False)
-            self._preview_and_apply(
-                editor, source, result.cleaned_source, "Remove Unused"
-            )
-
-        def on_error(message: str) -> None:
-            self._code_tools_panel.set_busy(False)
-            self._code_tools_panel.log(f"Remove unused failed: {message}")
-
-        worker = run_in_thread(perform)
-        worker.signals.result.connect(on_success)
-        worker.signals.error.connect(on_error)
+        self._code_tools_controller.remove_unused()
 
     @Slot()
     def _on_full_pipeline_requested(self) -> None:
-        editor = self._editor_tabs.current_editor()
-        if editor is None:
-            return
-        source = editor.toPlainText()
-        self._code_tools_panel.set_busy(True)
-        self._show_code_tools_panel()
-
-        def perform() -> PipelineResult:
-            return CodeToolsPipeline.run_full_pipeline(source)
-
-        def on_success(result: PipelineResult) -> None:
-            self._code_tools_panel.set_busy(False)
-            for step in result.steps:
-                marker = "✓" if step.changed else "·"
-                self._code_tools_panel.log(f"{marker} {step.step_name}: {step.detail}")
-            self._preview_and_apply(
-                editor, source, result.final_source, "Run Full Pipeline"
-            )
-
-        def on_error(message: str) -> None:
-            self._code_tools_panel.set_busy(False)
-            self._code_tools_panel.log(f"Pipeline failed: {message}")
-
-        worker = run_in_thread(perform)
-        worker.signals.result.connect(on_success)
-        worker.signals.error.connect(on_error)
+        self._code_tools_controller.full_pipeline()
 
     @Slot()
     def _on_generate_docstrings_requested(self) -> None:
-        editor = self._editor_tabs.current_editor()
-        if editor is None:
-            return
-        source = editor.toPlainText()
-        self._code_tools_panel.set_busy(True)
-        self._show_code_tools_panel()
-
-        def perform() -> DocstringGenerationResult:
-            return CodeGenerator.generate_docstrings(source)
-
-        def on_success(result: DocstringGenerationResult) -> None:
-            self._code_tools_panel.set_busy(False)
-            if result.inserted_symbols:
-                self._code_tools_panel.log(
-                    "Generated docstrings for: " + ", ".join(result.inserted_symbols)
-                )
-            else:
-                self._code_tools_panel.log("Generate Docstrings: nothing to document.")
-            self._preview_and_apply(
-                editor, source, result.generated_source, "Generate Docstrings"
-            )
-
-        def on_error(message: str) -> None:
-            self._code_tools_panel.set_busy(False)
-            self._code_tools_panel.log(f"Docstring generation failed: {message}")
-
-        worker = run_in_thread(perform)
-        worker.signals.result.connect(on_success)
-        worker.signals.error.connect(on_error)
+        self._code_tools_controller.generate_docstrings()
 
     @Slot()
     def _on_generate_tests_requested(self) -> None:
-        editor = self._editor_tabs.current_editor()
-        if editor is None:
-            return
-        source = editor.toPlainText()
-        raw_stem = editor.file_path().stem or "module"
-        module_name = (
-            raw_stem if raw_stem.isidentifier() else re.sub(r"\W|^(?=\d)", "_", raw_stem)
-        )
-        self._code_tools_panel.set_busy(True)
-        self._show_code_tools_panel()
-
-        def perform() -> TestGenerationResult:
-            return CodeGenerator.generate_unit_tests(source, module_name)
-
-        def on_success(result: TestGenerationResult) -> None:
-            self._code_tools_panel.set_busy(False)
-            if result.covered_symbols:
-                self._code_tools_panel.log(
-                    "Generated tests covering: " + ", ".join(result.covered_symbols)
-                )
-            else:
-                self._code_tools_panel.log(
-                    "Generate Unit Tests: no public symbols found; "
-                    "generated an import-only skeleton."
-                )
-            test_path = Path(f"test_{module_name}.py")
-            existing_test_editor = self._editor_tabs.editor_for_path(test_path)
-            if existing_test_editor is not None:
-                # A test file for this module is already open -- don't
-                # silently discard the freshly generated content, route it
-                # through the same diff-review as every other code-tools
-                # mutation.
-                self._editor_tabs.set_current_editor(existing_test_editor)
-                self._preview_and_apply(
-                    existing_test_editor,
-                    existing_test_editor.toPlainText(),
-                    result.generated_source,
-                    "Regenerate Unit Tests",
-                )
-                return
-            new_test_editor = self._editor_tabs.add_editor(
-                test_path, result.generated_source
-            )
-            # This buffer has no corresponding file on disk yet -- mark it
-            # unsaved so closing the tab (or the app) without an explicit
-            # Save prompts for confirmation instead of silently discarding
-            # the generated test.
-            new_test_editor.document().setModified(True)
-
-        def on_error(message: str) -> None:
-            self._code_tools_panel.set_busy(False)
-            self._code_tools_panel.log(f"Test generation failed: {message}")
-
-        worker = run_in_thread(perform)
-        worker.signals.result.connect(on_success)
-        worker.signals.error.connect(on_error)
+        self._code_tools_controller.generate_tests()
 
     @Slot(str, str)
     def _on_rename_requested(self, old_name: str, new_name: str) -> None:
-        editor = self._editor_tabs.current_editor()
-        if editor is None:
-            return
-        source = editor.toPlainText()
-        self._code_tools_panel.set_busy(True)
-        self._show_code_tools_panel()
-
-        def perform() -> RenameResult:
-            return SymbolRenamer.rename(source, old_name, new_name)
-
-        def on_success(result: RenameResult) -> None:
-            self._code_tools_panel.set_busy(False)
-            if result.occurrence_count == 0:
-                self._code_tools_panel.log(
-                    f"Rename: no occurrences of '{old_name}' found."
-                )
-                return
-            self._code_tools_panel.log(
-                f"Rename: {result.occurrence_count} occurrence(s) of "
-                f"'{old_name}' -> '{new_name}'."
-            )
-            self._preview_and_apply(
-                editor,
-                source,
-                result.renamed_source,
-                f"Rename '{old_name}' -> '{new_name}'",
-            )
-
-        def on_error(message: str) -> None:
-            self._code_tools_panel.set_busy(False)
-            self._code_tools_panel.log(f"Rename failed: {message}")
-
-        worker = run_in_thread(perform)
-        worker.signals.result.connect(on_success)
-        worker.signals.error.connect(on_error)
+        self._code_tools_controller.rename_symbol(old_name, new_name)
 
     # -------------------------------------------------------------------------
     # REPL & Terminal Operations
@@ -2759,159 +2016,22 @@ class MainWindow(QMainWindow):
     @Slot(int)
     def _on_bottom_tab_changed(self, index: int) -> None:
         """Trigger deep CPython internals inspection when the user selects that tab."""
+        if not hasattr(self, "_bottom_tabs"):
+            return
         widget = self._bottom_tabs.widget(index)
-        if widget == self._internals_panel:
+        if hasattr(self, "_internals_panel") and widget == self._internals_panel:
             self._inspect_internals()
-        elif widget == self._dep_panel:
+        elif hasattr(self, "_dep_panel") and widget == self._dep_panel:
             if not self._dep_panel._graph.all_packages:
                 self._refresh_dependencies()
 
-    def _run_single_linter(
-        self, tool: LintTool, file_path: Path, source_content: str
-    ) -> list[LintIssue]:
-        temporary_file_path = file_path.with_suffix(file_path.suffix + ".lint.tmp")
-        try:
-            temporary_file_path.write_text(source_content, encoding="utf-8")
-        except OSError as exception:
-            raise LinterError(
-                f"Failed to create temporary validation file: {exception}"
-            ) from exception
-
-        command_mapping = {
-            LintTool.FLAKE8: [
-                self._config.python_executable,
-                "-m",
-                "flake8",
-                "--max-line-length=120",
-                str(temporary_file_path),
-            ],
-            LintTool.PYLINT: [
-                self._config.python_executable,
-                "-m",
-                "pylint",
-                "--from-stdin",
-                "--score=n",
-                "--msg-template={path}:{line}:{column}:{msg_id}:{msg}",
-                str(temporary_file_path),
-            ],
-            LintTool.MYPY: [
-                self._config.python_executable,
-                "-m",
-                "mypy",
-                "--ignore-missing-imports",
-                "--no-error-summary",
-                "--show-column-numbers",
-                str(temporary_file_path),
-            ],
-        }
-
-        command = command_mapping[tool]
-        try:
-            input_content = source_content if tool == LintTool.PYLINT else None
-            completed_process = subprocess.run(
-                command,
-                input=input_content,
-                capture_output=True,
-                text=True,
-                timeout=60,
-                # Linters exit nonzero when they find issues -- that is
-                # their normal, successful operation, not a process
-                # failure -- so this must NOT raise on a nonzero exit code.
-                # The output is parsed below regardless of the exit code.
-                check=False,
-            )
-        except FileNotFoundError:
-            _LOGGER.warning(
-                "Linter tool %s is not installed or not found on system PATH.",
-                tool.value,
-            )
-            return []
-        except subprocess.TimeoutExpired as exception:
-            _LOGGER.warning("Linter tool %s operation timed out.", tool.value)
-            raise ProcessTimeoutError(f"Linter {tool.value} timed out.") from exception
-        finally:
-            try:
-                if temporary_file_path.exists():
-                    temporary_file_path.unlink()
-            except OSError as exception:
-                _LOGGER.debug("Could not clean up temporary lint file: %s", exception)
-
-        detected_issues: list[LintIssue] = []
-        regex_pattern = _LINTER_OUTPUT_PATTERNS[tool]
-        severity_resolver = _LINTER_SEVERITY_MAPPERS[tool]
-
-        combined_output = completed_process.stdout + completed_process.stderr
-        for line in combined_output.splitlines():
-            match_object = regex_pattern.match(line)
-            if not match_object:
-                continue
-            group_dictionary = match_object.groupdict()
-            code_value = group_dictionary.get("code") or "?"
-            try:
-                line_number = int(group_dictionary.get("line") or 1)
-                column_number = int(group_dictionary.get("col") or 0)
-            except (TypeError, ValueError):
-                continue
-
-            # Clear temporary formatting file paths from user view
-            raw_msg = group_dictionary.get("msg") or ""
-            cleaned_msg = raw_msg.replace(".lint.tmp", "").replace(".py.lint.tmp", "")
-
-            detected_issues.append(
-                LintIssue(
-                    file_path=file_path,
-                    line=line_number,
-                    column=column_number,
-                    code=code_value,
-                    tool=tool,
-                    severity=severity_resolver(code_value),
-                    message=cleaned_msg,
-                )
-            )
-        return detected_issues
 
     # -------------------------------------------------------------------------
     # Thread-Safe Package Management Handlers (Redirected to uv!)
     # -------------------------------------------------------------------------
 
     def _refresh_packages(self) -> None:
-        self._status_label.setText("Refreshing python environment packages...")
-        virtualenv_path = self._get_virtualenv_path()
-
-        def fetch_packages() -> list[PipPackage]:
-            cmd = self.get_package_manager_cmd("list")
-            try:
-                completed_process = subprocess.run(
-                    cmd,
-                    capture_output=True,
-                    text=True,
-                    timeout=30,
-                    check=True,
-                )
-            except FileNotFoundError as exc:
-                raise RuntimeError(
-                    "Neither 'uv' nor python 'pip' executable was found on your system PATH."
-                ) from exc
-
-            try:
-                raw_package_list = json.loads(completed_process.stdout)
-            except json.JSONDecodeError as exception:
-                raise LinterParseError(
-                    "Failed to decode pip packages JSON list."
-                ) from exception
-
-            return [
-                PipPackage(
-                    name=package_item["name"],
-                    version=package_item["version"],
-                    location=Path(package_item.get("location", "")),
-                )
-                for package_item in raw_package_list
-            ]
-
-        worker = run_in_thread(fetch_packages)
-        worker.signals.result.connect(self._on_packages_refreshed)
-        worker.signals.error.connect(self._on_package_operation_failed)
+        self._package_controller.refresh_packages(self.get_runtime_python())
 
     @Slot(object)
     def _on_packages_refreshed(self, packages: list[PipPackage]) -> None:
@@ -2928,35 +2048,10 @@ class MainWindow(QMainWindow):
         )
 
     def _install_package(self, package_name: str) -> None:
-        if self._offline_service.is_offline() and not self._offline_service.get_local_wheelhouse_dir():
-            msg = (
-                f"Cannot install '{package_name}': PipViper is running in Offline Mode.\n\n"
-                f"To install packages:\n"
-                f"• Switch to Online Mode (Opt-in) via the status bar.\n"
-                f"• Or configure a local wheelhouse directory for offline installs."
-            )
-            self._status_label.setText("Install blocked: Offline Mode active.")
-            QMessageBox.warning(self, "Offline Mode Active", msg)
-            return
-
-        self._status_label.setText(f"Installing package '{package_name}'...")
-
-        def run_install() -> None:
-            self._package_service.install_package(self.get_runtime_python(), package_name)
-
-        worker = run_in_thread(run_install)
-        worker.signals.finished.connect(self._refresh_packages)
-        worker.signals.error.connect(self._on_package_operation_failed)
+        self._package_controller.install_package(self.get_runtime_python(), package_name, self)
 
     def _uninstall_package(self, package_name: str) -> None:
-        self._status_label.setText(f"Uninstalling package '{package_name}'...")
-
-        def run_uninstall() -> None:
-            self._package_service.uninstall_package(self.get_runtime_python(), package_name)
-
-        worker = run_in_thread(run_uninstall)
-        worker.signals.finished.connect(self._refresh_packages)
-        worker.signals.error.connect(self._on_package_operation_failed)
+        self._package_controller.uninstall_package(self.get_runtime_python(), package_name, self)
 
     # -------------------------------------------------------------------------
     # Text Search & Cursor Jump Helpers
@@ -3124,17 +2219,8 @@ class MainWindow(QMainWindow):
             else:
                 cmd = [runtime_py, "-m", "pip", "install", "--upgrade", clean_pkg]
 
-            sanitized_cmd = self._process_service.sanitize_arguments(cmd)
-            safe_env = self._process_service.build_safe_environment()
-            extra_kwargs: dict[str, Any] = {"capture_output": True, "text": True, "timeout": 60, "env": safe_env}
-            if sys.platform == "win32":
-                extra_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
-                startupinfo = subprocess.STARTUPINFO()
-                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-                extra_kwargs["startupinfo"] = startupinfo
-
             try:
-                proc = subprocess.run(sanitized_cmd, **extra_kwargs)
+                proc = self._process_service.run_command(cmd, timeout=60.0)
                 out = proc.stdout + ("\n" + proc.stderr if proc.stderr else "")
                 from PySide6.QtCore import QTimer
                 QTimer.singleShot(0, lambda: self._on_upgrade_finished(package_name, out, proc.returncode == 0))

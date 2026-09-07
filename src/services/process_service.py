@@ -61,8 +61,11 @@ class ProcessService:
                     f"Argument at index {index} must be a str or Path, got {type(argument).__name__}"
                 )
             arg_str = str(argument)
-            # Check for shell metacharacters
-            if _DANGEROUS_SHELL_CHARS_REGEX.search(arg_str):
+            # Safe exception: format flags for tools (e.g. git log) can use delimiters like | without shell execution
+            check_str = arg_str
+            if arg_str.startswith(("--pretty=format:", "--format=", "--date-format=")):
+                check_str = re.sub(r"^--(?:pretty=)?format:[^;&`$<>]*", "", arg_str)
+            if _DANGEROUS_SHELL_CHARS_REGEX.search(check_str):
                 raise ProcessSecurityError(
                     f"Dangerous shell characters detected in argument at index {index}: {arg_str!r}"
                 )
@@ -169,6 +172,7 @@ class ProcessService:
         env: Optional[Mapping[str, str]] = None,
         check: bool = False,
         capture_output: bool = True,
+        input: Optional[str] = None,
     ) -> subprocess.CompletedProcess[str]:
         """Execute a validated command synchronously with timeout and process protection."""
         sanitized_cmd = self.sanitize_arguments([str(c) for c in cmd])
@@ -179,8 +183,13 @@ class ProcessService:
             "cwd": working_dir,
             "env": safe_env,
             "text": True,
+            "encoding": "utf-8",
+            "errors": "replace",
             "shell": False,  # Strict enforcement: NEVER shell=True
         }
+
+        if input is not None:
+            kwargs["input"] = input
 
         if capture_output:
             kwargs["capture_output"] = True

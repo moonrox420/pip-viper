@@ -194,21 +194,11 @@ class EnvironmentDetector:
                 except Exception:
                     pass
 
-        # Fallback: execute python --version
+        # Fallback: execute python --version via ProcessService
         if executable.is_file():
             try:
-                kwargs: dict[str, Any] = {
-                    "capture_output": True,
-                    "text": True,
-                    "timeout": 2.0,
-                }
-                if sys.platform == "win32":
-                    kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
-                    startupinfo = subprocess.STARTUPINFO()
-                    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-                    kwargs["startupinfo"] = startupinfo
-
-                proc = subprocess.run([str(executable), "--version"], **kwargs)
+                from .services.process_service import ProcessService
+                proc = ProcessService.get_instance().run_command([str(executable), "--version"], timeout=2.0)
                 out = (proc.stdout or proc.stderr).strip()
                 if "Python" in out:
                     ver = out.split()[1]
@@ -334,13 +324,8 @@ class EnvironmentDetector:
             py_launcher = shutil.which("py")
             if py_launcher:
                 try:
-                    kwargs: dict[str, Any] = {
-                        "capture_output": True,
-                        "text": True,
-                        "timeout": 2.0,
-                        "creationflags": subprocess.CREATE_NO_WINDOW,
-                    }
-                    proc = subprocess.run(["py", "-0p"], **kwargs)
+                    from .services.process_service import ProcessService
+                    proc = ProcessService.get_instance().run_command(["py", "-0p"], timeout=2.0)
                     for line in proc.stdout.splitlines():
                         line = line.strip()
                         if line.startswith("-") and "*" in line or line.startswith("-"):

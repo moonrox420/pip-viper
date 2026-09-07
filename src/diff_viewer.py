@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QPlainTextEdit,
     QPushButton,
     QSplitter,
     QTableWidget,
@@ -434,3 +435,69 @@ class DiffViewerDialog(QDialog):
         self.stage_requested = self._viewer.stage_requested
         self.unstage_requested = self._viewer.unstage_requested
         self.discard_requested = self._viewer.discard_requested
+
+
+class DiffDialog(QDialog):
+    """An interactive window showing side-by-side original and modified code for review."""
+
+    def __init__(
+        self,
+        original_code: str,
+        modified_code: str,
+        palette: ColorPalette,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Review Code Adjustments")
+        self.resize(1100, 750)
+
+        self.setStyleSheet(
+            f"QDialog {{ background-color: {palette.background}; color: {palette.text}; }}"
+            f"QLabel {{ font-weight: bold; color: {palette.text}; }}"
+            f"QPushButton {{ background-color: {palette.panel}; color: {palette.text}; border: 1px solid {palette.border}; border-radius: 3px; padding: 6px 12px; }}"
+            f"QPushButton:hover {{ background-color: {palette.selection}; }}"
+        )
+
+        label_left = QLabel("Current Source Code:")
+        label_right = QLabel("Refactored Code Adjustments:")
+
+        self.original_view = QPlainTextEdit(self)
+        self.original_view.setReadOnly(True)
+        self.original_view.setFont(QFont("Consolas", 10))
+        self.original_view.setPlainText(original_code)
+
+        self.modified_view = QPlainTextEdit(self)
+        self.modified_view.setFont(QFont("Consolas", 10))
+        self.modified_view.setPlainText(modified_code)
+
+        col_layout = QHBoxLayout()
+        left_box = QVBoxLayout()
+        left_box.addWidget(label_left)
+        left_box.addWidget(self.original_view)
+
+        right_box = QVBoxLayout()
+        right_box.addWidget(label_right)
+        right_box.addWidget(self.modified_view)
+
+        col_layout.addLayout(left_box, 1)
+        col_layout.addLayout(right_box, 1)
+
+        self.accept_button = QPushButton("Accept and Update Code", self)
+        self.accept_button.clicked.connect(self.accept)
+
+        self.reject_button = QPushButton("Discard Suggestion", self)
+        self.reject_button.clicked.connect(self.reject)
+
+        button_layout = QHBoxLayout()
+        button_layout.addStretch(1)
+        button_layout.addWidget(self.reject_button)
+        button_layout.addWidget(self.accept_button)
+
+        layout = QVBoxLayout(self)
+        layout.addLayout(col_layout)
+        layout.addLayout(button_layout)
+
+    def get_modified_code(self) -> str:
+        """Return the user-reviewed code block."""
+        return self.modified_view.toPlainText()
+

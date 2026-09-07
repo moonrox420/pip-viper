@@ -140,10 +140,9 @@ class PytestEngine(QObject):
 
         cmd = [py_bin, "-m", "pytest", "--collect-only", "-q"]
         try:
-            result = subprocess.run(
+            from .services.process_service import ProcessService
+            result = ProcessService.get_instance().run_command(
                 cmd,
-                capture_output=True,
-                text=True,
                 cwd=str(project_root),
                 timeout=30,
             )

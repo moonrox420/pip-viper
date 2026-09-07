@@ -137,3 +137,67 @@ class EditorController(QObject):
         if editor:
             editor.jump_to_line(line_number, column_number)
 
+    def open_file_dialog(self, parent_widget: Optional[QWidget] = None) -> Optional[CodeEditor]:
+        """Prompt user with file open dialog and load selected file."""
+        chosen_path, _ = QFileDialog.getOpenFileName(
+            parent_widget, "Open File", "", "Python Files (*.py);;All Files (*)"
+        )
+        if chosen_path:
+            return self.open_file(Path(chosen_path))
+        return None
+
+    def open_folder_dialog(
+        self, parent_widget: Optional[QWidget] = None
+    ) -> Optional[Path]:
+        """Prompt user with folder open dialog."""
+        folder = QFileDialog.getExistingDirectory(parent_widget, "Open Workspace Folder")
+        if folder:
+            return Path(folder)
+        return None
+
+    def handle_unsaved_close(
+        self, tab_index: int, parent_widget: Optional[QWidget] = None
+    ) -> bool:
+        """Check if tab is dirty and prompt user before closing. Return True if safe to close."""
+        editor = self._tabs.widget(tab_index)
+        if editor is None or not getattr(editor, "is_modified", lambda: False)():
+            self._tabs.removeTab(tab_index)
+            return True
+
+        file_name = editor.file_path().name if hasattr(editor, "file_path") else "Untitled"
+        reply = QMessageBox.question(
+            parent_widget,
+            "Unsaved Changes",
+            f"Save changes to '{file_name}' before closing?",
+            QMessageBox.StandardButton.Save
+            | QMessageBox.StandardButton.Discard
+            | QMessageBox.StandardButton.Cancel,
+        )
+        if reply == QMessageBox.StandardButton.Save:
+            self._tabs.setCurrentIndex(tab_index)
+            if self.save_current_file(parent_widget):
+                self._tabs.removeTab(tab_index)
+                return True
+            return False
+        elif reply == QMessageBox.StandardButton.Discard:
+            self._tabs.removeTab(tab_index)
+            return True
+        return False
+
+    def autosave(self) -> int:
+        """Silently save modified files with established file paths. Return saved count."""
+        saved_count = 0
+        for i in range(self._tabs.editor_count()):
+            editor = self._tabs.widget(i)
+            if editor and getattr(editor, "is_modified", lambda: False)():
+                fp = getattr(editor, "file_path", lambda: None)()
+                if fp and not fp.name.startswith("untitled_"):
+                    try:
+                        fp.write_text(editor.toPlainText(), encoding="utf-8")
+                        editor.mark_saved()
+                        saved_count += 1
+                    except Exception as exc:
+                        _LOGGER.warning("Autosave failed for %s: %s", fp, exc)
+        return saved_count
+
+

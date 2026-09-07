@@ -678,11 +678,10 @@ class GitPanel(QWidget):
 
         def execute_git() -> str:
             try:
-                proc = subprocess.run(
+                from ..services.process_service import ProcessService
+                proc = ProcessService.get_instance().run_command(
                     ["git", *command_arguments],
                     cwd=self._project_root,
-                    capture_output=True,
-                    text=True,
                     timeout=30,
                     check=False,
                 )

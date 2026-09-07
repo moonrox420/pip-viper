@@ -50,6 +50,10 @@ class AIService(QObject):
         self._endpoint_url = url.strip()
 
     @property
+    def is_connected(self) -> bool:
+        return self._is_connected
+
+    @property
     def model_name(self) -> str:
         return self._model
 
@@ -59,6 +63,14 @@ class AIService(QObject):
     def check_health(self, timeout: float = 3.0) -> bool:
         """Check if local AI sidecar is reachable."""
         parsed = urllib.parse.urlparse(self._endpoint_url)
+        hostname = (parsed.hostname or "").lower()
+        if hostname not in ("localhost", "127.0.0.1", "::1", "0.0.0.0"):
+            self._is_connected = False
+            msg = f"Non-localhost AI endpoint blocked: '{self._endpoint_url}'. PipViper strictly permits only local AI endpoints (localhost/127.0.0.1)."
+            _LOGGER.error(msg)
+            self.status_changed.emit(False, msg)
+            return False
+
         base_url = f"{parsed.scheme}://{parsed.netloc}"
         try:
             req = urllib.request.Request(f"{base_url}/api/tags", headers={"User-Agent": "PipViper-IDE/7.0.0"})

@@ -106,3 +106,8 @@ class OfflineService(QObject):
         self._settings.setValue(_SETTINGS_WHEELHOUSE_KEY, path_str)
         _LOGGER.info("Local wheelhouse directory configured: %s", path_str or "(None)")
         self.wheelhouse_changed.emit(path_str)
+
+
+def assert_network_allowed(feature_name: str) -> None:
+    """Convenience module function that checks network permission via the OfflineService singleton."""
+    OfflineService.get_instance().assert_network_allowed(feature_name)

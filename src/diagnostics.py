@@ -145,22 +145,14 @@ class RuffService:
 
         try:
             cwd = str(self._project_root) if self._project_root else None
-            extra_kwargs: dict[str, Any] = {}
-            if sys.platform == "win32":
-                extra_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
-                startupinfo = subprocess.STARTUPINFO()
-                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-                extra_kwargs["startupinfo"] = startupinfo
-
-            result = subprocess.run(
+            from .services.process_service import ProcessService
+            result = ProcessService.get_instance().run_command(
                 cmd,
-                input=source.encode("utf-8"),
-                capture_output=True,
+                input=source,
                 cwd=cwd,
                 timeout=5,
-                **extra_kwargs,
             )
-            stdout = result.stdout.decode("utf-8", errors="replace").strip()
+            stdout = result.stdout.strip()
             if not stdout:
                 return []
             return self._parse_ruff_json(stdout, str(file_path))
@@ -373,20 +365,11 @@ class MypyService:
 
         try:
             cwd = str(self._project_root) if self._project_root else str(file_path.parent)
-            extra_kwargs: dict[str, Any] = {}
-            if sys.platform == "win32":
-                extra_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
-                startupinfo = subprocess.STARTUPINFO()
-                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-                extra_kwargs["startupinfo"] = startupinfo
-
-            proc = subprocess.run(
+            from .services.process_service import ProcessService
+            proc = ProcessService.get_instance().run_command(
                 cmd,
-                capture_output=True,
-                text=True,
                 cwd=cwd,
                 timeout=15,
-                **extra_kwargs,
             )
             return self._parse_mypy_output(proc.stdout, file_path)
         except (subprocess.TimeoutExpired, subprocess.SubprocessError, OSError) as exc:
