@@ -1,0 +1,41 @@
+# Python compilation caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.pytest_tmp/
+.pytest_tmp_run/
+temp_pytest/
+tmp*/
+.mypy_cache/
+
+
+.ruff_cache/
+.tox/
+.coverage
+htmlcov/
+
+# Python Virtual Environments
+.venv/
+venv/
+env/
+ENV/
+bin/
+lib/
+include/
+pyvenv.cfg
+
+# PipViper logs & temporary diagnostic files
+.src/logs/
+*.lint.tmp
+welcome.py
+
+# Project-specific IDE settings
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS-specific clutter
+.DS_Store
+Thumbs.db

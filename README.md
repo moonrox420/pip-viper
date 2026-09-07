@@ -1,170 +1,189 @@
 # PipViper IDE 🐍
 
-PipViper is a modern, high-performance, and offline-first Python Integrated Development Environment (IDE) built entirely on PySide6 and standard Python libraries. Designed for absolute privacy and local-first execution, PipViper decouples heavy processes (linters, completions, packages, version control, and AI) into thread-safe background workers to keep your main graphical user interface perfectly fluid.
+PipViper is a modern, high-performance, **offline-first** Python Integrated Development Environment (IDE) built on PySide6 and standard Python libraries. Designed for absolute privacy, zero silent network calls, and local-first execution, PipViper operates completely disconnected from external servers by default.
 
 ---
 
-## 🌟 Key Features
+## 🔒 True Offline-First Architecture
 
-*   **Dual-Engine Code Repair**:
-    *   **Deterministic (Code Tools)**: Rule-based, compiler-validated syntax auto-fixer that resolves missing colons, unbalanced brackets, tab/space mix-ups, unclosed string literals, and obsolete Python 2 print statements natively.
-    *   **Semantic (Local AI Sidecar)**: Non-deterministic generative refactoring powered by local models (e.g., `qwen2.5-coder:7b`) to handle structural rearrangements and complex algorithm rewrites offline.
-*   **Smart Workspace & `.venv` Auto-Discovery**: Automatically scans your active project directory, maps platform-specific interpreters (Unix `bin/python` vs. Windows `Scripts/python.exe`), and dynamically retargets your runs, debugpy debuggers, and REPL subshells to your project's local virtual environment.
-*   **Widescreen-Optimized Bottom Dock**: All action controls inside the **Code Tools** panel are aligned horizontally to maximize horizontal screen real estate. This prevents layout compression on short screens, leaving the entire lower half open for logging grids and diagnostics.
-*   **Self-Healing Environment Scanner**: Statically analyzes your open files using an Abstract Syntax Tree (AST) to detect unresolved imports, prompting you with an inline warning banner to auto-install missing packages using `uv` or falling back cleanly to standard `pip` if `uv` is absent.
-*   **Jedi Workspace Indexing**: Leverages sequential background `jedi.Project` configurations, allowing Jedi's autocompletion, hover documentation, signatures, and go-to-definition engines to resolve your own local modules across files instantly.
-*   **REPL Navigation History**: Implements a non-blocking keyboard event interceptor on the interactive subshell input field, allowing you to cycle through previously executed commands with the **Up** and **Down** arrow keys.
+PipViper enforces a strict **Offline-First Non-Negotiable Principle**:
+* **Zero silent network calls**: No telemetry, no automatic update pinging, and no hidden tracking.
+* **Global Offline Mode**: Enabled by default on first launch. Every network path is hard-disabled until explicitly opted into.
+* **Local AI Only**: AI features communicate strictly with local sidecars (e.g., Ollama or llama.cpp on `127.0.0.1`). External cloud model endpoints are rejected.
+
+### Capabilities Matrix
+
+| Feature Domain | Offline Status | Operational Details |
+| :--- | :--- | :--- |
+| **Core Editing & Folding** | **100% Offline** | Syntax highlighting, code folding, bracket matching, indentation engines. |
+| **Code Navigation & Jedi** | **100% Offline** | Autocomplete, parameter hints, hover docs, and jump-to-definition via local `jedi`. |
+| **Script Execution & REPL** | **100% Offline** | Run scripts, interact with the persistent subshell, and stream stdout/stderr locally. |
+| **Visual Debugger** | **100% Offline** | Interactive stepping, call stack inspection, variables, and breakpoints via `debugpy`. |
+| **Testing Engine** | **100% Offline** | Pytest test discovery, single/file/suite runner, live gutter status badges. |
+| **Linting & Code Tools** | **100% Offline** | Ruff, Mypy, Flake8, Black, isort, autoflake, AST syntax auto-fixer, docstring generator. |
+| **Internals & Profiling** | **100% Offline** | AST visualizer, bytecode disassembler, symtable explorer, cProfile flame chart, memory meter. |
+| **Git Source Control** | **100% Offline** | Stage/unstage, commits, branches, side-by-side diff viewer, gutter change markers (local repo). |
+| **Dependency Scanning** | **100% Offline** | Analyzes AST imports and local `site-packages` metadata with zero PyPI calls. |
+| **Local AI Assistant** | **Requires Local Sidecar** | Queries local Ollama / llama.cpp instance (`http://127.0.0.1:11434`). Never hits external APIs. |
+| **Package Installs / Updates** | **Optional / Gated** | Blocked in Offline Mode. When Online Mode is opted into, installs packages via `uv`/`pip`. Supports local wheelhouse (`--find-links`). |
 
 ---
 
-## 📂 Project Architecture
+## 🌟 Key Highlights
+
+* **Deterministic & Local Semantic Code Repair**:
+  * **Deterministic (Code Tools)**: Rule-based syntax auto-fixer that repairs colons, brackets, tabs/spaces, unclosed strings, and print syntax natively without network.
+  * **Semantic (Local AI Sidecar)**: Optional generative refactoring powered by local LLMs (e.g., `qwen2.5-coder:7b`) with mandatory side-by-side diff review before applying changes.
+* **Smart Workspace & Environment Discovery**:
+  * Automatically discovers virtual environments (`.venv`, Conda, Poetry, Pipenv, system Python) in the active project.
+  * Allows dynamic switching of runtime interpreters without restarting the IDE.
+* **Process & Security Hardening**:
+  * Shell metacharacter validation and argument sanitization on all subprocess executions.
+  * Process tree termination (`taskkill /F /T` / `os.kill`) guarantees cancel buttons kill long-running processes.
+  * Sanitized process environment prevents leakage of sensitive host environment variables.
+* **Persistent Status Indicators**:
+  * Permanent **Offline Mode** status badge (`🔒 Offline Mode` / `🌐 Online (Opt-in)`).
+  * Real-time memory meter, active Git branch, cursor coordinates, and active interpreter badge.
+
+---
+
+## 📂 Project Structure
 
 ```text
 pip-viper/
 ├── src/
-│   ├── __init__.py         # Package entry point (non-blocking re-export bridge)
-│   ├── __main__.py         # Standard python -m entry point
-│   ├── app.py              # MainWindow orchestrator, slots, and signal routing
-│   ├── code_tools.py       # Syntax repair, Black formatter, isort, autoflake, generators
-│   ├── editor.py           # CodeEditor, state-machine highlighter, auto-indenter
-│   ├── panels.py           # Bottom-dock panels (Output, REPL, CodeTools, AI, Git, Packages, Log)
-│   ├── pip_viper.py        # Core models, trace logging, background workers, JediService
-│   ├── styles.py           # Comprehensive global QSS flat stylesheet generator
-│   └── widgets.py          # Sidebar widgets (Workspace File Explorer, Document Outline)
-├── .gitignore              # Standard python/IDE build-artifact mask
-├── launcher.py             # Desktop startup script (environmental locks & DPI scaling)
-└── pyproject.toml          # Modern PEP 621 packaging and dependencies metadata
-🚀 Installation & Setup
-Prerequisites
-Python: Version 3.10 or newer.
-uv (Optional, highly recommended): For ultra-fast package listings and installations.
-Installing in Development Mode
-Clone the repository and install it in editable mode inside your virtual environment:
-code
-Bash
+│   ├── app.py                     # Main orchestrator window shell
+│   ├── code_tools.py              # Rule-based syntax fixer, formatters, docstrings
+│   ├── debug_harness.py           # IPC JSON debug harness wrapper
+│   ├── dependencies.py            # Local AST dependency graph and requirements scanner
+│   ├── diagnostics.py             # Ruff and Mypy integration services
+│   ├── diff_viewer.py             # Side-by-side graphical diff inspection dialog
+│   ├── editor.py                  # CodeEditor canvas, syntax highlighter, line gutter
+│   ├── environment.py             # Virtualenv detector and interpreter selector
+│   ├── internals.py               # AST, bytecode, symtable, cProfile engines
+│   ├── memory_tracker.py          # Real-time process memory telemetry
+│   ├── navigation.py              # Quick Open (Ctrl+P) and Search in Files
+│   ├── pip_viper.py               # Core configuration, models, threading, logging
+│   ├── profiler_visualizer.py     # Execution profiler visualization widget
+│   ├── repl_harness.py            # Subshell harness
+│   ├── styles.py                  # Dark / Light / Monokai flat QSS themes
+│   ├── testing.py                 # Pytest runner engine and discovery
+│   ├── vcs.py                     # Local Git service wrapper
+│   ├── widgets.py                 # File explorer, document outline, memory meter, offline badge
+│   ├── controllers/               # Decomposed UI controllers (A1)
+│   │   ├── ai_controller.py
+│   │   ├── editor_controller.py
+│   │   ├── environment_controller.py
+│   │   ├── layout_controller.py
+│   │   ├── package_controller.py
+│   │   ├── run_debug_controller.py
+│   │   └── status_bar_controller.py
+│   ├── panels/                    # Modular bottom-dock panels (A2)
+│   │   ├── ai_panel.py
+│   │   ├── code_tools_panel.py
+│   │   ├── debug_panel.py
+│   │   ├── dependency_studio_panel.py
+│   │   ├── git_panel.py
+│   │   ├── internals_panel.py
+│   │   ├── lint_widget.py
+│   │   ├── log_panel.py
+│   │   ├── output_panel.py
+│   │   ├── package_manager_widget.py
+│   │   ├── repl_panel.py
+│   │   └── test_runner_panel.py
+│   └── services/                  # Explicit service layer & composition root (A3, A5)
+│       ├── ai_service.py
+│       ├── code_tools_service.py
+│       ├── container.py
+│       ├── diagnostics_service.py
+│       ├── environment_service.py
+│       ├── git_service.py
+│       ├── jedi_service.py
+│       ├── linter_service.py
+│       ├── offline_service.py
+│       └── process_service.py
+├── desktop_packaging/             # PyInstaller standalone build & smoke test scripts
+├── tests/                         # Comprehensive 210+ test suite (100% offline)
+└── pyproject.toml                 # Package definition and dependencies
+```
+
+---
+
+## 🚀 Installation & Setup
+
+### Prerequisites
+* **Python**: 3.10 or newer.
+* **PySide6**, **pydantic**, **jedi**.
+
+### Development Install
+```bash
 # Clone the repository
-git clone https://github.com/your-username/pip-viper.git
+git clone https://github.com/moonrox420/pip-viper.git
 cd pip-viper
 
-# Create and activate your virtual environment
-uv venv
-source .venv/bin/activate  # On Windows: .venv\Scripts\activate
+# Create and activate virtual environment
+python -m venv .venv
+# On Windows:
+.venv\Scripts\activate
+# On Unix/macOS:
+source .venv/bin/activate
 
-# Install editable dependencies
-uv pip install -e .
-💻 Usage
-Launching the IDE
-You can start the desktop application either through your terminal or by executing the root launcher script:
-code
-Bash
-# Method A: Package Execution
+# Install dependencies and editable package
+pip install -e .
+```
+
+---
+
+## 💻 Launching the IDE
+
+```bash
+# Method A: Via installed CLI entrypoint
+pip-viper
+
+# Method B: Direct module launch
 python -m src
 
-# Method B: Direct Launcher
+# Method C: Standalone launcher script
 python launcher.py
+```
 
-# Method C: Installed CLI Trigger (after running uv pip install)
-pip-viper
-Local AI Sidecar Integration
-To use the built-in offline AI Assistant:
-Download and run Ollama locally on your machine.
-Pull a coding model (such as Qwen 2.5 Coder):
-code
-Bash
-ollama pull qwen2.5-coder:1.5b
-Ensure Ollama is running, open the right-side AI Sidecar panel in PipViper, configure your model tag (e.g. qwen2.5-coder:1.5b), and start querying or refactoring locally.
-🧪 Local Fine-Tuning Pipeline (Unsloth QLoRA)
-If you have highly optimized Python training datasets (such as a custom "Python God Coder" dataset), you can fine-tune Qwen2.5-Coder-7B-Instruct locally and export it directly to GGUF format.
-1. Structure Your Dataset (dataset.jsonl)
-Format your custom training examples into a standard JSONL file containing OpenAI-style chat messages matching Qwen's tokens:
-code
-JSON
-{"messages": [{"role": "system", "content": "You are a professional Python software engineer."}, {"role": "user", "content": "Write a custom QLineEdit in PySide6."}, {"role": "assistant", "content": "```python\n..."}]}
-2. Run the Unsloth Training Script
-Save and execute this training script using the pre-staged unsloth environment inside your local virtualenv:
-code
-Python
-# unsloth_train.py
-import torch
-from datasets import load_dataset
-from unsloth import FastLanguageModel
-from trl import SFTConfig, SFTTrainer
+---
 
-# Config
-MAX_SEQ_LENGTH = 2048
-MODEL_NAME = "Qwen/Qwen2.5-Coder-7B-Instruct"
-DATASET_PATH = "dataset.jsonl"
-GGUF_OUTPUT_DIR = "./qwen-god-coder-gguf"
+## 🤖 Local AI Setup (Ollama / Local Sidecar)
 
-# Load Model
-model, tokenizer = FastLanguageModel.from_pretrained(
-    model_name=MODEL_NAME,
-    max_seq_length=MAX_SEQ_LENGTH,
-    dtype=None,
-    load_in_4bit=True,
-)
+PipViper does not connect to external AI services (no OpenAI, Anthropic, or remote API keys). To use the AI Assistant:
 
-# Configure LoRA adapters
-model = FastLanguageModel.get_peft_model(
-    model,
-    r=16,
-    target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
-    lora_alpha=32,
-    lora_dropout=0,
-    bias="none",
-    use_gradient_checkpointing="unsloth",
-    random_state=3407,
-)
+1. Install [Ollama](https://ollama.ai/) locally.
+2. Start the Ollama server:
+   ```bash
+   ollama serve
+   ```
+3. Pull your preferred coding model:
+   ```bash
+   ollama pull qwen2.5-coder:7b
+   # or for lightweight setups:
+   ollama pull qwen2.5-coder:1.5b
+   ```
+4. Open the right-side **AI Assistant** panel in PipViper, set your model tag (`qwen2.5-coder:7b`), and enter your prompt.
+5. Any code suggested by the AI will be presented in a **Side-by-Side Diff Review Dialog** for your inspection before any file on disk is modified.
 
-# Load and format dataset
-dataset = load_dataset("json", data_files=DATASET_PATH, split="train")
-formatted_dataset = dataset.map(
-    lambda x: {"text": [tokenizer.apply_chat_template(conv, tokenize=False) for conv in x["messages"]]},
-    batched=True
-)
+---
 
-# Train
-trainer = SFTTrainer(
-    model=model,
-    tokenizer=tokenizer,
-    train_dataset=formatted_dataset,
-    dataset_text_field="text",
-    max_seq_length=MAX_SEQ_LENGTH,
-    args=SFTConfig(
-        output_dir="./outputs",
-        per_device_train_batch_size=2,
-        gradient_accumulation_steps=8,
-        learning_rate=2e-4,
-        num_train_epochs=3,
-        fp16=not torch.cuda.is_bf16_supported(),
-        bf16=torch.cuda.is_bf16_supported(),
-        logging_steps=1,
-        dataset_text_field="text",
-        report_to=[],
-    )
-)
-trainer.train()
+## 🧪 Running the Test Suite
 
-# Merge weights and export directly to Q8_0 GGUF
-model.save_pretrained_gguf(GGUF_OUTPUT_DIR, tokenizer, quantization_method="q8_0")
-print("[unsloth] Pipeline complete! GGUF file generated.")
-3. Register with Ollama
-Create a file named Modelfile inside ./qwen-god-coder-gguf:
-code
-Dockerfile
-FROM ./model-q8_0.gguf
-TEMPLATE """{{ if .System }}<|im_start|>system
-{{ .System }}<|im_end|>
-{{ end }}<|im_start|>user
-{{ .Prompt }}<|im_end|>
-<|im_start|>assistant
-"""
-PARAMETER stop "<|im_start|>"
-PARAMETER stop "<|im_end|>"
-Build the model locally:
-code
-Bash
-ollama create qwen2.5-coder:7b-god -f Modelfile
-Type qwen2.5-coder:7b-god into your PipViper AI Sidecar panel and enjoy fully private, customized, and accelerated AI assistance!
-📜 License
-This project is licensed under the MIT License. See LICENSE for details.
+PipViper includes a comprehensive automated test suite verifying offline behavior, process cancellation, controllers, and services:
+
+```bash
+pytest -v
+```
+
+To run packaging smoke tests and release artifact hygiene checks:
+```bash
+python desktop_packaging/build_standalone.py --smoke-test --validate
+```
+
+---
+
+## 📜 License
+
+MIT License. Copyright (c) 2026 Dustin Hill. See `LICENSE` for details.
